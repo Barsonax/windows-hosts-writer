@@ -16,6 +16,7 @@ namespace windows_hosts_writer
         private const string EVENT_MSG = "got a {0} event from {1}";
         private static DockerClient _client;
         private static bool _debug = false;
+        private const string WhwIdentifier = "Added by whw";
 
         static void Main(string[] args)
         {
@@ -68,6 +69,7 @@ namespace windows_hosts_writer
 
             try
             {
+                CleanHostFile();
                 DockerClient client = GetClient();
                 IList<ContainerListResponse> containers = client.Containers.ListContainersAsync(new ContainersListParameters()).Result;
                 foreach (ContainerListResponse containerListResponse in containers)
@@ -160,6 +162,28 @@ namespace windows_hosts_writer
             return hostsFileStream;
         }
 
+        private static void CleanHostFile()
+        {
+            FileStream hostsFileStream = FindHostFile();
+            if (hostsFileStream == null)
+                return;
+
+            var hostsLines = new List<string>();
+            using (StreamReader reader = new StreamReader(hostsFileStream))
+            using (StreamWriter writer = new StreamWriter(hostsFileStream))
+            {
+                while (!reader.EndOfStream)
+                    hostsLines.Add(reader.ReadLine());
+
+                hostsFileStream.Position = 0;
+                int removed = hostsLines.RemoveAll(l => l.EndsWith(WhwIdentifier));
+
+                foreach (string line in hostsLines)
+                    writer.WriteLine(line);
+                hostsFileStream.SetLength(hostsFileStream.Position);
+            }
+        }
+
         private static void WriteHostNames(bool add, FileStream hostsFileStream, string containerId)
         {
             try
@@ -177,12 +201,12 @@ namespace windows_hosts_writer
                             hostsLines.Add(reader.ReadLine());
 
                         hostsFileStream.Position = 0;
-                        int removed = hostsLines.RemoveAll(l => l.EndsWith($"#{containerId} by whw"));
+                        int removed = hostsLines.RemoveAll(l => l.EndsWith($"#{containerId} {WhwIdentifier}"));
 
                         foreach (string alias in network.Aliases)
                         {
                             if (add)
-                                hostsLines.Add($"{network.IPAddress}\t{alias}\t\t#{containerId} by whw");
+                                hostsLines.Add($"{network.IPAddress}\t{alias}\t\t#{containerId} {WhwIdentifier}");
                         }
 
                         foreach (string line in hostsLines)
