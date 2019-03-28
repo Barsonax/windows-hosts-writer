@@ -68,7 +68,14 @@ namespace windows_hosts_writer
 
             try
             {
-                GetClient().System.MonitorEventsAsync(containerEventsParams, progress, default(CancellationToken)).Wait();
+                DockerClient client = GetClient();
+                IList<ContainerListResponse> containers = client.Containers.ListContainersAsync(new ContainersListParameters()).Result;
+                foreach (ContainerListResponse containerListResponse in containers)
+                {
+                    WriteHostNames(true, containerListResponse.ID);
+                }
+
+                client.System.MonitorEventsAsync(containerEventsParams, progress, default(CancellationToken)).Wait();
             }
             catch (Exception ex)
             {
@@ -91,88 +98,112 @@ namespace windows_hosts_writer
 
         private static void HandleHosts(bool add, Message message)
         {
-            FileStream hostsFileStream = null;
+            if (message.Actor.Attributes["type"] == "nat")
+            {
+                string containerId = message.Actor.Attributes["container"];
+                WriteHostNames(add, containerId);
+            }
+        }
+
+        private static void WriteHostNames(bool add, string containerId)
+        {
+            FileStream hostsFileStream = FindHostFile();
+            if (hostsFileStream == null)
+                return;
             try
             {
-
-                while (hostsFileStream == null)
-                {
-                    int tryCount = 0;
-                    var hostsPath = Environment.GetEnvironmentVariable(ENV_HOSTPATH) ?? "c:\\driversetc\\hosts";
-
-                    try
-                    {
-                        hostsFileStream = File.Open(hostsPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
-                    }
-                    catch (FileNotFoundException)
-                    {
-                        // no access to hosts
-                        Console.WriteLine(ERROR_HOSTPATH, hostsPath);
-                        return;
-                    }
-                    catch (UnauthorizedAccessException)
-                    {
-                        // no access to hosts
-                        Console.WriteLine(ERROR_HOSTPATH, hostsPath);
-                        return;
-                    }
-                    catch (IOException)
-                    {
-                        if (tryCount == 5)
-                        {
-                            Console.WriteLine(ERROR_HOSTPATH, hostsPath);
-                            return;  // only try five times and then give up
-                        }
-                        Thread.Sleep(1000);
-                        tryCount++;
-                    }
-                }
-                if (message.Actor.Attributes["type"] == "nat")
-                {
-                    var containerId = message.Actor.Attributes["container"];
-                    try {
-                        var response = GetClient().Containers.InspectContainerAsync(containerId).Result;
-                        var networks = response.NetworkSettings.Networks;
-                        EndpointSettings network = null;
-                        if (networks.TryGetValue("nat", out network))
-                        {
-                            var hostsLines = new List<string>();
-                            using (StreamReader reader = new StreamReader(hostsFileStream))
-                            using (StreamWriter writer = new StreamWriter(hostsFileStream))
-                            {
-                                while (!reader.EndOfStream)
-                                    hostsLines.Add(reader.ReadLine());
-
-                                hostsFileStream.Position = 0;
-                                var removed = hostsLines.RemoveAll(l => l.EndsWith($"#{containerId} by whw"));
-
-                                if (add)
-                                    hostsLines.Add($"{network.IPAddress}\t{response.Config.Hostname}\t\t#{containerId} by whw");
-
-                                foreach (var line in hostsLines)
-                                    writer.WriteLine(line);
-                                hostsFileStream.SetLength(hostsFileStream.Position);
-                            }
-                        }
-                    } catch (Exception ex) {
-                        if (_debug)
-                        {
-                            Console.WriteLine("Something went wrong. Maybe looking for a container that is already gone? Exception is " + ex.Message);
-                            Console.WriteLine(ex.StackTrace);
-                            if (ex.InnerException != null)
-                            {
-                                Console.WriteLine();
-                                Console.WriteLine("InnerException is " + ex.InnerException.Message);
-                                Console.WriteLine(ex.InnerException.StackTrace);
-                            }
-                        }
-                    }
-                }
+                WriteHostNames(add, hostsFileStream, containerId);
             }
             finally
             {
-                if (hostsFileStream != null)
-                    hostsFileStream.Dispose();
+                hostsFileStream.Dispose();
+            }
+        }
+
+        private static FileStream FindHostFile()
+        {
+            FileStream hostsFileStream = null;
+            while (hostsFileStream == null)
+            {
+                int tryCount = 0;
+                string hostsPath = Environment.GetEnvironmentVariable(ENV_HOSTPATH) ?? "c:\\driversetc\\hosts";
+                hostsPath = @"C:\Windows\System32\drivers\etc\hosts";
+                try
+                {
+                    hostsFileStream = File.Open(hostsPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+                }
+                catch (FileNotFoundException)
+                {
+                    // no access to hosts
+                    Console.WriteLine(ERROR_HOSTPATH, hostsPath);
+                    return null;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // no access to hosts
+                    Console.WriteLine(ERROR_HOSTPATH, hostsPath);
+                    return null;
+                }
+                catch (IOException)
+                {
+                    if (tryCount == 5)
+                    {
+                        Console.WriteLine(ERROR_HOSTPATH, hostsPath);
+                        return null;
+                    }
+
+                    Thread.Sleep(1000);
+                    tryCount++;
+                }
+            }
+
+            return hostsFileStream;
+        }
+
+        private static void WriteHostNames(bool add, FileStream hostsFileStream, string containerId)
+        {
+            try
+            {
+                ContainerInspectResponse response = GetClient().Containers.InspectContainerAsync(containerId).Result;
+                IDictionary<string, EndpointSettings> networks = response.NetworkSettings.Networks;
+                EndpointSettings network = null;
+                if (networks.TryGetValue("nat", out network))
+                {
+                    var hostsLines = new List<string>();
+                    using (StreamReader reader = new StreamReader(hostsFileStream))
+                    using (StreamWriter writer = new StreamWriter(hostsFileStream))
+                    {
+                        while (!reader.EndOfStream)
+                            hostsLines.Add(reader.ReadLine());
+
+                        hostsFileStream.Position = 0;
+                        int removed = hostsLines.RemoveAll(l => l.EndsWith($"#{containerId} by whw"));
+
+                        foreach (string alias in network.Aliases)
+                        {
+                            if (add)
+                                hostsLines.Add($"{network.IPAddress}\t{alias}\t\t#{containerId} by whw");
+                        }
+
+                        foreach (string line in hostsLines)
+                            writer.WriteLine(line);
+                        hostsFileStream.SetLength(hostsFileStream.Position);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_debug)
+                {
+                    Console.WriteLine("Something went wrong. Maybe looking for a container that is already gone? Exception is " + ex.Message);
+                    Console.WriteLine(ex.StackTrace);
+                    if (ex.InnerException != null)
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine("InnerException is " + ex.InnerException.Message);
+                        Console.WriteLine(ex.InnerException.StackTrace);
+                    }
+                }
             }
         }
 
@@ -180,7 +211,7 @@ namespace windows_hosts_writer
         {
             if (_client == null)
             {
-                var endpoint = Environment.GetEnvironmentVariable(ENV_ENDPOINT) ?? "npipe://./pipe/docker_engine";
+                string endpoint = Environment.GetEnvironmentVariable(ENV_ENDPOINT) ?? "npipe://./pipe/docker_engine";
                 _client = new DockerClientConfiguration(new System.Uri(endpoint)).CreateClient();
             }
             return _client;
